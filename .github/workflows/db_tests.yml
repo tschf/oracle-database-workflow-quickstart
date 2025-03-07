@@ -1,0 +1,47 @@
+name: database tests
+run-name: database tests by ${{ github.actor }} on branch ${{ github.ref_name }}
+on: [push]
+jobs:
+  db-setup:
+    runs-on: ubuntu-latest
+    env:
+      APP_USER: github_workflow
+      PODMAN_NETWORK_NAME: db-net
+      SQLCL_VERSION: latest
+    steps:
+      - name: setup_db_credentials
+        run: |
+          APP_USER_PASSWORD=$(printf "pw#%s" "$(openssl rand -hex 8)")
+          SYS_PASSWORD=$(printf "pw#%s" "$(openssl rand -hex 8)")
+          echo "APP_USER_PASSWORD=$APP_USER_PASSWORD" >> $GITHUB_ENV
+          echo "SYS_PASSWORD=$SYS_PASSWORD" >> $GITHUB_ENV
+      - name: checkout files
+        uses: actions/checkout@v4
+      - name: create podman network
+        run: podman network create "${PODMAN_NETWORK_NAME}"
+      - name: db install
+        uses: gvenzl/setup-oracle-free@v1.2.0
+        with:
+          app-user: "${APP_USER}"
+          app-user-password: "${APP_USER_PASSWORD}"
+          oracle-password: "${SYS_PASSWORD}"
+          container-network: "${PODMAN_NETWORK_NAME}"
+      - name: db install logs
+        run: podman logs oracledb
+      - run: podman pull container-registry.oracle.com/database/sqlcl:"${SQLCL_VERSION}"
+      - name: (dba) prepare db
+        run: podman run --name apex_install --net "${PODMAN_NETWORK_NAME}" -v $(pwd):/opt/oracle/sql_scripts:ro --rm sqlcl:"${SQLCL_VERSION}" -L "sys/$SYS_PASSWORD@oracledb:1521/freepdb1" as sysdba @setup_scripts/_setup_scripts.sql
+      - name: apex install
+        run: |
+          curl https://download.oracle.com/otn_software/apex/apex-latest.zip -o apex.zip
+          echo "extracting apex.zip"
+          unzip -q -d apex_setup apex.zip
+
+          echo "install APEX runtime"
+          cd apex_setup/apex
+
+          podman run --name apex_install --net "${PODMAN_NETWORK_NAME}" -v $(pwd):/opt/oracle/sql_scripts:ro --rm sqlcl:"${SQLCL_VERSION}" -L "sys/$SYS_PASSWORD@oracledb:1521/freepdb1" as sysdba @apxrtins.sql DATA DATA TEMP /i/
+          cd ../..
+          rm apex.zip
+      - name: install project
+        run: podman run --name sqlcl --net "${PODMAN_NETWORK_NAME}" -v $(pwd):/opt/oracle/sql_scripts:ro --rm sqlcl:"${SQLCL_VERSION}" -L "$APP_USER/$APP_USER_PASSWORD@oracledb:1521/freepdb1" @install.sql
